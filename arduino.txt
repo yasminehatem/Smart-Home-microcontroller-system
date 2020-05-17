@@ -1,0 +1,152 @@
+#include <LiquidCrystal.h>
+
+//Pins configuration :
+//--------------------
+const int rs = 12, en = 11, d4 = 7, d5 = 6, d6 = 5, d7 = 4;     // LCD pins connected to arduino.
+const int emergency_LED = 8 ;                                   // emergency LED when temperature exceeds threshold temp it is turned on.
+int Threshold_temp = 40 ;                                       // Threshold temperature.
+int Temp ;
+bool flag = false;                                              // the flag that we will control using timer1
+
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+void setup() {
+
+  // initiate serial communication
+  Serial.begin(9600);
+  
+  // initiate Timer 1
+  set_timer1();
+
+  // initiate ADC unit
+  set_ADC();
+
+  // define the LED pin as output
+  pinMode(emergency_LED, OUTPUT);
+  
+  // set up the LCD's number of columns and rows:
+  lcd.begin(16, 2);
+}
+
+void loop() {
+
+  Check_Temp();
+  LCD_display();  
+
+}
+
+void Check_Temp(){
+  
+  // turn on the led if the temp exceeds the threshold value. if not, the led remains turned off
+
+  if(Temp > Threshold_temp)
+    digitalWrite(emergency_LED, HIGH);
+  else 
+    digitalWrite(emergency_LED, LOW);
+  }
+
+void LCD_display(){
+  
+  // set the cursor to column 0, line 0
+  // (note: line 1 is the second row, since counting begins with 0):
+  lcd.setCursor(0, 0);
+  
+  lcd.print("Temp is :");
+  
+  // set the cursor to column 10 as the above string is 9 characters long
+  lcd.setCursor(10,0);
+
+  // we will not take a new temperature value until the flag is set
+  if(flag){
+    lcd.print(Temp);
+
+    // send the temperature via serial port to the computer to use it in our processing program
+    Serial.print(Temp);
+    // we add a "," after every read to seperate readings in order to plot them in the processing code
+    Serial.print(',');
+    }
+  
+  // we need to clear the flag after reading the temp **check "set_timer1" for more info**
+  flag = 0 ;
+
+  
+  }
+
+void set_timer1(){
+
+  /*/
+   * we need a sampling rate of 1 read/second , so we need to wait one second between each read
+   * so the flag will remain false until one second is passed then it will become true and we take
+   * one read then the flag is set to false again to wait another second and so on ...
+   * ----------------------------------------------------------------------------------------------;
+   * Arduino's crystal is 16 MHz, so one cycle takes (1/(16*10^6)) seconds to be excuted
+   * Timer1 is a 16-bit timer, it will overflow after 65536+1 cycles.  
+   * so Timer1 takes  4.1 mS to overflow which is too small for our case,so we will use prescaler
+   * dividing the clock by 256 , so one cycle will take (1/(16*10^6))*256 = 16 MicroSec
+   * In order to achive 1 second delay we need (1Sec/16MicroSec)= 62500 cycles
+   * ----------------------------------------------------------------------------------------------;
+   * To make Timer1 count 62500 time we put an initial value in TCNT1 registers with the value of 
+   * 65537 - 62500 = 3037 , but as this value if greater than 255 -one register- we write the value 
+   * of each register individually 
+   * (3037) in decimal = (BDD) in Hex 
+   * 
+    */
+
+  cli();                                      // stop all interrupts while setting the timer
+  TCNT1H = 0x0B;                              // write on TCNT1 High register
+  TCNT1L = 0xDD;                              // write on TCNT1 Low  register
+
+  TCCR1A = 0x00;                              // Timer1 in normal mode
+  TCCR1B = 0x04;                              // using internal clock, with a prescaler 1:256
+  TIMSK1=(1<<TOIE1);                          // enable timer1 overflow interrupt
+
+  sei();                                      // enable all interrupts 
+ }
+
+ISR(TIMER1_OVF_vect){
+  TCNT1H = 0x0B;
+  TCNT1L = 0xDD;
+  flag =! flag ;                              // toggle flag 
+  }
+
+
+void set_ADC(){
+  
+  /*
+   *  we take a new reading every time the ADC interrupt is triggered, which is triggered after an end of conversion signal.
+   *  The ADC unit is 10-bit resolution while the atmega328p is 8-bit , so the ADC unit has two registers to store readings
+   *  which are ADCH & ADCL. That will leave us with 6 unused bits so we choose whether to make the unused bits the most 
+   *  or the least significant bits in the two registers.
+   *  As the ADC unit is 10-bits the Vref is divided by 1024 (2^10) , so with different Vreference values we get different 
+   *  voltages corresponding to it according to this equation :  output = ((Vin/Vref)*1024).
+   *  The ADC unit can NOT operate on the same clock as arduino (16 MHz) due to  hardware limitation, it operates 
+   *  on a clock between 50 KHz to 200 KHz . So we need to divide (prescale) the clock until its in the range of ADC operation.
+   *  The ADC has more than one channel (and differential input) so we choose the channal in use.
+   *  ---------------------------------------------------------------------------------------------------------------------;
+   *  Mainly, we have two registers to write on in order to successfully use ADC unit    
+   *  ADC Control and Status Register :
+   *  This register is used to enable the ADC unit, set the mode of operation which is "Auto trigger" in our case, 
+   *  enable the ADC interrupt and set the prescaler value.
+   *  ADC Multiplexer Selection Register : 
+   *  This register is used to choose the ADC channel and the Vref we're using.
+   */
+   
+  cli();                                                  // stop all interrupts while setting the ADC
+  ADCSRA = 0x8F ;                                         // enable ADC,enable interrupt and set prescaler
+  ADCSRA |= 1 << ADATE ;                                  // set ADC mode of operation
+  ADMUX  |= 1<<REFS0 ;                                    // set Vref to AVcc
+  ADCSRA |= 1<<ADSC ;                                     // start conversion
+  sei();                                                  // enable all interrupts
+  }
+ 
+
+ISR(ADC_vect)
+{
+  /* 
+   * The LM35 produces 10mV per degree Celcius. However, the ADC unit inside the arduino divides the Vref into 1024 step
+   * so that means when Vref is set to 2.56V  then 1 step from the 1024 is equal to (1/1024)*2.56 = 2.5mV.
+   * then one degree Celcius is equal to 4 steps of the ADC reading from the arduino  
+  */
+
+  Temp = ADCW/4;
+  }
